@@ -1,0 +1,323 @@
+trigger: none  
+pr: none
+
+variables:
+  - group: 112 MigrationTest
+  - group: TERRAFORM
+  - name: agentName
+    value: 'Salud-112'
+  - name: CustomerPackagesUploadScriptPath
+    value: 'C:\Build\CustomerPackages\CustomerPackages\Europe\Cork\Run-UploadPackages.ps1'
+  - name: CustomerPackagesXmlReferencePath
+    value: 'C:\Build\CustomerPackages\CustomerPackages\Europe\Cork'
+  - name: API_URL
+    value: 'https://salud-112.environments.titanium.solutions/salud/api/'
+
+resources:
+  pipelines:
+    - pipeline: SaludServicesTrunk  # Alias for the referenced pipeline
+      project: Titanium                     # The project where the pipeline exists
+      source: "Salud Services Trunk"        # The actual pipeline name (quoted because it contains spaces)
+      trigger:
+        tags:
+        - ReleaseReady        
+stages:
+  - stage: BuildTemporaryServer
+    displayName: "Build Server"
+    jobs:
+      - job: Build
+        pool:
+          name: Dublin
+          demands: 'agent.name -equals devops1-agent'
+        steps:
+          - checkout: self
+            clean: true
+            # Step 1: Install Terraform
+          - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+            inputs:
+              terraformVersion: 'latest' 
+          
+          - task: PowerShell@2
+            displayName: 'Set Terraform Environment Variables'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Set environment variables for Terraform (ARM provider)
+                $env:ARM_CLIENT_ID       = "$(CLIENT_ID)"
+                $env:ARM_CLIENT_SECRET   = "$(CLIENT_SECRET)"
+                $env:ARM_SUBSCRIPTION_ID = "$(SUBSCRIPTION_ID)"
+                $env:ARM_TENANT_ID       = "$(TENANT_ID)"
+                Write-Host "ARM environment variables set."
+
+          # Step 2: Initialize Terraform in the root of the repository
+          - powershell: terraform init -reconfigure
+            displayName: 'Terraform Init'
+            workingDirectory: $(System.DefaultWorkingDirectory)
+            env:
+              ARM_CLIENT_ID: $(CLIENT_ID)
+              ARM_CLIENT_SECRET: $(CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(TENANT_ID)
+
+              TF_VAR_admin_password: $(ADMIN_PASSWORD)
+              TF_VAR_storage_account_key: $(STORAGE_ACCOUNT_KEY)
+              TF_VAR_storage_account_name: $(STORAGE_ACCOUNT_NAME)
+          
+          # Step 3: Plan Terraform (no approval required)
+          - powershell: terraform plan
+            displayName: 'Terraform Plan'
+            workingDirectory: $(System.DefaultWorkingDirectory)
+            env:
+              ARM_CLIENT_ID: $(CLIENT_ID)
+              ARM_CLIENT_SECRET: $(CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(TENANT_ID)
+
+              TF_VAR_admin_password: $(ADMIN_PASSWORD)
+              TF_VAR_storage_account_key: $(STORAGE_ACCOUNT_KEY)
+              TF_VAR_storage_account_name: $(STORAGE_ACCOUNT_NAME)
+
+          # Step 4: Apply Terraform changes with auto-approve to skip confirmation
+          - powershell: terraform apply -auto-approve
+            displayName: 'Terraform Apply'
+            workingDirectory: $(System.DefaultWorkingDirectory)
+            env:
+              ARM_CLIENT_ID: $(CLIENT_ID)
+              ARM_CLIENT_SECRET: $(CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(TENANT_ID)
+
+              TF_VAR_admin_password: $(ADMIN_PASSWORD)
+              TF_VAR_storage_account_key: $(STORAGE_ACCOUNT_KEY)
+              TF_VAR_storage_account_name: $(STORAGE_ACCOUNT_NAME)
+
+  - stage: FetchSaludArtifacts
+    displayName: "Download Stage"
+    jobs:
+      - job: DownloadArtifacts
+        pool:
+          name: Dublin
+          demands: 'agent.name -equals $(AgentName)-Agent'
+        workspace:
+          clean: all
+        steps:
+          - checkout: self
+            clean: true
+          # Download artifacts from the SaludServicesTrunkPipeline
+          - download: SaludServicesTrunk
+            artifact: drop
+            patterns: |
+              drop/CustomerPackages.zip
+              drop/Setup_Salud.msi
+            displayName: "Downloading Artifacts"
+          # Copy the downloaded artifacts to the build directory
+          - task: PowerShell@2
+            displayName: "Copying Artifacts to Build Directory"
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/Copy-Artifacts.ps1"
+              arguments: >
+                -sourcePath "$(Pipeline.Workspace)\SaludServicesTrunk\drop\"
+                -destinationPath "C:\Build\"
+                -itemsToMove "Setup_Salud.msi,CustomerPackages.zip"
+              failOnStderr: true
+            # Extract the CustomerPackages.zip file
+          - powershell: |
+              $zipPath = "C:\Build\CustomerPackages.zip"
+              $extractPath = "C:\Build\CustomerPackages"
+              Write-Host "ZIP Path: $zipPath"
+              Write-Host "Extract Path: $extractPath"
+              Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+            displayName: "Extracting CustomerPackages.zip"
+  - stage: InstallApplication
+    displayName: "Install Application Stage"
+    dependsOn:
+      - FetchSaludArtifacts
+    condition: succeeded()  # Ensure this stage runs only if the previous stage succeeded
+    jobs:
+      - job: InstallAppJob
+        pool:
+          name: Dublin
+          demands: 'agent.name -equals $(AgentName)-Agent'
+        steps:
+          - checkout: self
+          # Stop the IIS service
+          - task: PowerShell@2
+            displayName: "Stop IIS Services"
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/Stop-IIS.ps1"
+          # Uninstall the Origin application
+          - task: PowerShell@2
+            displayName: "Uninstall Salud Application"
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/Uninstall-Salud.ps1"
+              arguments: >
+                -ApplicationName: "Salud Web Services"
+                -Uninstall
+              failOnStderr: true
+          # Install the Salud application
+          - task: PowerShell@2
+            displayName: "Install Salud Application"
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/Install-Salud.ps1"
+              arguments: >
+                -buildDirectory "C:\Build\" 
+                -installerFile "Setup_Salud.msi" 
+                -logFile "msiexec.log" 
+                -installDir "C:\Program Files\Titanium Solutions" 
+                -features "SelfCheckInFeature,WebServicesFeature,ConfigureIISFeature,APIServicesFeature,RenderServicesFeature" 
+                -webSite "Default Web Site" 
+                -webDescription "Default Web Site" 
+                -webSPort 80 
+                -webSiteIp "*" 
+                -dsnMssqlDatabase $ENV:DB_NAME
+                -dsnMssqlUsername $ENV:SQL_USER
+                -dsnMssqlPassword $ENV:SQL_PASSWORD
+                -dsnMssqlServer $ENV:DB_IP
+                -webServicesPathName "TITANIUMWSERVER" 
+                -webApplicationsPathName "TITANIUMCLIENT" 
+                -allowMultipleVersions "No" 
+                -webAppName "Salud" 
+                -webAppPool "TitaniumSolutionsDentalAppPool"
+                -webAppPoolCreate "true" 
+                -documentsPath "%ALLUSERSPROFILE%\Titanium Solutions\Documents" 
+                -reportingServicesURL "" 
+                -reportingServicesContextFolder "" 
+                -reportingServicesMenuFolder "" 
+                -reportingServicesUserName "" 
+                -reportingServicesPassword ""
+            env:
+              DB_IP: $(privateDB)
+              DB_NAME: $(databaseName)
+              SQL_USER: $(databaseUser)
+              SQL_PASSWORD: $(databasePassword)
+              failOnStderr: true              
+          # Configure IIS Application
+          - task: PowerShell@2
+            displayName: "Configure IIS Services"
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/Configure-IIS.ps1"
+            continueOnError: true
+
+  - stage: DatabaseMigration
+    displayName: "Database Migration Stage"
+    dependsOn: 
+      - InstallApplication
+    condition: succeeded() 
+    jobs:
+      - job: MigrateDatabaseJob
+        pool:
+          name: Dublin
+          demands: 'agent.name -equals $(AgentName)-Agent'
+        steps:
+
+          # Run the database migration
+          - task: PowerShell@2
+            displayName: "Run Data Migration"
+            continueOnError: true
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/Run-DatabaseMigration.ps1"
+              arguments: >
+                -exePath "C:\Program Files\Titanium Solutions\Dental Web Services\bin\Titanium.Migration.DataAccess.Migration.exe" 
+                -server $ENV:DB_IP
+                -database $ENV:DB_NAME 
+                -user $ENV:SQL_USER
+                -password $ENV:SQL_PASSWORD 
+                -logFile "C:\Build\DataMigrationLog.txt"
+            env:
+              DB_IP: $(privateDB)
+              DB_NAME: $(databaseName)
+              SQL_USER: $(databaseUser)
+              SQL_PASSWORD: $(databasePassword)
+              failOnStderr: true
+          # Display Migration Log Message
+          - task: PowerShell@2
+            displayName: "Display Migration Log Message"
+            condition: eq(variables['Agent.JobStatus'], 'SucceededWithIssues')
+            continueOnError: true
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/NewMigration-Message.ps1"
+            env:
+              SUBSCRIPTION: $(SubscriptionId)
+
+          # Start the IIS service
+          - task: PowerShell@2
+            displayName: "Start IIS Services"
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/Start-IIS.ps1"
+              failOnStderr: true
+          
+          # Configure Customer Packages for Upload
+          - task: PowerShell@2
+            displayName: "Configure CustomerPackages"
+            inputs:
+              filePath: "$(Build.SourcesDirectory)/scripts/Create-UploadWebServices.ps1"
+              arguments: >
+                -url "$(API_URL)" 
+                -username $env:USERNAME 
+                -password $env:PASSWORD
+                -clinic $env:CLINIC
+                -filepath "$(CustomerPackagesXmlReferencePath)"
+            env:
+              USERNAME: $(app_username)
+              PASSWORD: $(app_password)
+              CLINIC: $(ClinicKey)
+
+          # Copy upload customer packages wrapper script to the build directory
+          - task: CopyFiles@2
+            inputs:
+              SourceFolder: '$(Build.SourcesDirectory)/scripts'
+              Contents: 'Run-UploadPackages.ps1'
+              TargetFolder: '$(CustomerPackagesXmlReferencePath)'
+              failOnStderr: true
+
+          # Install the CustomerPackages
+          - task: PowerShell@2
+            displayName: "Install CustomerPackages"
+            inputs:
+              filePath: "$(CustomerPackagesUploadScriptPath)"
+            continueOnError: true
+  
+#################### Terraform Destroy ##################    
+  - stage: DestroyEnvironment
+    displayName: "Destroy Temporary Environment"
+    dependsOn:
+      - DatabaseMigration
+    condition: always()   # Run even if previous stages fail
+    jobs:
+      - job: Destroy
+        pool:
+          name: Dublin
+          demands: 'agent.name -equals devops1-agent'
+        steps:
+          - checkout: self
+            clean: true
+
+          # Install Terraform
+          - task: ms-devlabs.custom-terraform-tasks.custom-terraform-installer-task.TerraformInstaller@0
+            inputs:
+              terraformVersion: 'latest'
+
+          # Init (must use same backend/config as apply)
+          - script: |
+              cd $(System.DefaultWorkingDirectory)
+              terraform init -upgrade
+            displayName: 'Terraform Init'
+            env:
+              ARM_CLIENT_ID: $(CLIENT_ID)
+              ARM_CLIENT_SECRET: $(CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(TENANT_ID)
+
+          # Destroy
+          - script: |
+              terraform -chdir=$(System.DefaultWorkingDirectory) destroy -auto-approve -target=azurerm_virtual_machine_extension.setup_script -target=azurerm_windows_virtual_machine.vm -target=azurerm_network_interface_security_group_association.nsg_assoc -target=azurerm_network_interface.nic -target=azurerm_resource_group.vm_rg
+            displayName: 'Terraform Destroy'
+            env:
+              ARM_CLIENT_ID: $(CLIENT_ID)
+              ARM_CLIENT_SECRET: $(CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(TENANT_ID)
+
+              TF_VAR_admin_password: $(ADMIN_PASSWORD)
+              TF_VAR_storage_account_key: $(STORAGE_ACCOUNT_KEY)
+              TF_VAR_storage_account_name: $(STORAGE_ACCOUNT_NAME)
