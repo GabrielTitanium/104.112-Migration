@@ -149,7 +149,7 @@ stages:
           - task: PowerShell@2
             displayName: "Uninstall Salud Application"
             inputs:
-              filePath: "$(Build.SourcesDirectory)/scripts/Uninstall-Salud.ps1"
+              filePath: "$(Build.SourcesDirectory)/scripts/Uninstall.ps1"
               arguments: >
                 -ApplicationName: "Salud Web Services"
                 -Uninstall
