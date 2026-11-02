@@ -60,7 +60,6 @@ stages:
               ARM_TENANT_ID: $(TENANT_ID)
 
               TF_VAR_admin_password: $(ADMIN_PASSWORD)
-              TF_VAR_storage_account_key: $(STORAGE_ACCOUNT_KEY)
               TF_VAR_storage_account_name: $(STORAGE_ACCOUNT_NAME)
           
           # Step 3: Plan Terraform (no approval required)
@@ -74,7 +73,6 @@ stages:
               ARM_TENANT_ID: $(TENANT_ID)
 
               TF_VAR_admin_password: $(ADMIN_PASSWORD)
-              TF_VAR_storage_account_key: $(STORAGE_ACCOUNT_KEY)
               TF_VAR_storage_account_name: $(STORAGE_ACCOUNT_NAME)
 
           # Step 4: Apply Terraform changes with auto-approve to skip confirmation
@@ -88,7 +86,6 @@ stages:
               ARM_TENANT_ID: $(TENANT_ID)
 
               TF_VAR_admin_password: $(ADMIN_PASSWORD)
-              TF_VAR_storage_account_key: $(STORAGE_ACCOUNT_KEY)
               TF_VAR_storage_account_name: $(STORAGE_ACCOUNT_NAME)
 
   - stage: FetchSaludArtifacts
@@ -319,5 +316,4 @@ stages:
               ARM_TENANT_ID: $(TENANT_ID)
 
               TF_VAR_admin_password: $(ADMIN_PASSWORD)
-              TF_VAR_storage_account_key: $(STORAGE_ACCOUNT_KEY)
               TF_VAR_storage_account_name: $(STORAGE_ACCOUNT_NAME)

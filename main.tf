@@ -17,6 +17,7 @@ terraform {
     storage_account_name = "tfstateorigin123"
     container_name       = "tfstate"
     key                  = "Salud-112.tfstate"
+    use_azuread_auth     = true
   }
 }
 
@@ -48,9 +49,13 @@ variable "storage_account_name" {
   description = "Name of the storage account where the setup.ps1 script is stored"
 }
 
-variable "storage_account_key" {
-  description = "Key for the storage account where the setup.ps1 script is stored"
-  sensitive   = true
+# User-assigned identity the VM uses to download setup.ps1, instead of a storage
+# account key (same as DVOP-ServerDeploy). It exists in the shared resource group
+# with Storage Blob Data Reader on the pwscripts "test" container only.
+variable "scripts_identity_name" {
+  description = "User-assigned identity that can read setup.ps1 in the storage account"
+  type        = string
+  default     = "id-terraform-vm-scripts"
 }
 
 ################################
@@ -84,6 +89,11 @@ data "azurerm_subnet" "existing_subnet" {
 
 data "azurerm_network_security_group" "existing_nsg" {
   name                = "main-nsg"
+  resource_group_name = var.shared_resource_group_name
+}
+
+data "azurerm_user_assigned_identity" "scripts" {
+  name                = var.scripts_identity_name
   resource_group_name = var.shared_resource_group_name
 }
 
@@ -147,6 +157,11 @@ resource "azurerm_windows_virtual_machine" "vm" {
   network_interface_ids = [
     azurerm_network_interface.nic.id
   ]
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [data.azurerm_user_assigned_identity.scripts.id]
+  }
+
 
   os_disk {
     name                 = "${var.server_name}-osdisk-${random_id.suffix.hex}"
@@ -186,8 +201,7 @@ SETTINGS
 
   protected_settings = <<PROTECTED_SETTINGS
 {
-  "storageAccountName": "${var.storage_account_name}",
-  "storageAccountKey": "${var.storage_account_key}",
+  "managedIdentity": { "clientId": "${data.azurerm_user_assigned_identity.scripts.client_id}" },
   "fileUris": [
     "https://${var.storage_account_name}.blob.core.windows.net/test/setup.ps1"
   ]
